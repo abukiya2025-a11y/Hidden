@@ -1,0 +1,65 @@
+name: Infinity Plus CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+    # 1. Download the code
+    - name: 📥 checkout repository
+      uses: actions/checkout@v4
+
+    # 2.activate python
+    - name: set up python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    # 3. needed for voice and music
+    - name: 🎵 install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg libopus0 opus-tools libmagic1
+
+    # 4. install python libraries
+    - name: install python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+    # 5. .env file from github serets
+    - name: create .env from secrets
+      run: |
+        touch .env
+        echo "API_ID=${{ secrets.API_ID }}" >> .env
+        echo "API_HASH=${{ secrets.API_HASH }}" >> .env
+        echo "SESSION=${{ secrets.SESSION }}" >> .env
+        echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" >> .env
+        echo "GEMINI_KEY1=${{ secrets.GEMINI_KEY1 }}" >> .env
+        echo "OWNER_ID=${{ secrets.OWNER_ID }}" >> .env
+        cat .env
+
+    # 6. start the bot
+    - name: 🚀 ignite infinity system
+      continue-on-error: true
+      run: |
+        python main.py
+
+    # 7. the bot is close dump logs
+    - name: 📤 upload logs (If crashed)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: bot-logs
+        path: |
+          *.log
+          *.err
